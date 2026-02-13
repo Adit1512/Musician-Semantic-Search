@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Musician Semantic Search</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f6f9; margin: 0; padding: 40px 20px; color: #333; }
+        .container { max-width: 720px; margin: auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 18px rgba(0,0,0,0.08); }
+        h1 { color: #6c3df4; margin-top: 0; display: flex; align-items: center; gap: 10px; }
+        .subtitle { color: #666; margin-bottom: 30px; font-size: 0.9rem; }
+        .search-box { display: flex; gap: 10px; margin-bottom: 25px; }
+        input { flex: 1; padding: 12px; border-radius: 8px; border: 2px solid #ddd; font-size: 16px; transition: border-color 0.3s; }
+        input:focus { border-color: #6c3df4; outline: none; }
+        button { padding: 12px 25px; border-radius: 8px; border: none; background: #6c3df4; color: white; cursor: pointer; font-weight: bold; transition: background 0.3s; }
+        button:hover { background: #5629d8; }
+        
+        /* Result Styling */
+        .result-card { display: none; animation: fadeIn 0.4s ease forwards; margin-top: 20px; }
+        .thumbnail { text-align: center; margin-bottom: 25px; }
+        .thumbnail img { max-width: 220px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); background: #eee; }
+        .data-row { display: flex; padding: 14px 0; border-bottom: 1px solid #eee; align-items: flex-start; }
+        .data-row:last-child { border-bottom: none; }
+        .label { width: 140px; font-weight: 600; color: #555; flex-shrink: 0; }
+        .value { line-height: 1.6; }
+
+        /* Status States */
+        .loading, .error { display: none; text-align: center; margin-top: 20px; padding: 15px; border-radius: 8px; }
+        .loading { color: #6c3df4; font-weight: 500; background: #f0ebff; }
+        .error { color: #d32f2f; background: #ffebee; border: 1px solid #ffcdd2; }
+
+        @keyframes fadeIn { from {opacity: 0; transform: translateY(10px);} to {opacity: 1; transform: translateY(0);} }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🎵 Musician Semantic Search</h1>
+    <p class="subtitle">Eksplorasi Profil Musisi dari Graph Data Wikipedia (DBpedia)</p>
+
+    <div class="search-box">
+        <input type="text" id="searchInput" placeholder="Contoh: Queen, Coldplay, Nidji" value="Nidji">
+        <button id="btnSearch" onclick="fetchMusician()">Cari Musisi</button>
+    </div>
+
+    <div class="loading" id="loadingState">⏳ Mengakses Linked Data DBpedia...</div>
+    <div class="error" id="errorState"></div>
+
+    <div class="result-card" id="resultArea">
+        <div class="thumbnail">
+            <img id="resImg" alt="Artist Thumbnail">
+        </div>
+        <div class="data-row"><span class="label">Nama:</span><span class="value" id="resName"></span></div>
+        <div class="data-row"><span class="label">Asal Kota:</span><span class="value" id="resOrigin"></span></div>
+        <div class="data-row"><span class="label">Genre:</span><span class="value" id="resGenre"></span></div>
+        <div class="data-row"><span class="label">Tahun Aktif:</span><span class="value" id="resActive"></span></div>
+        <div class="data-row" style="flex-direction: column;">
+            <span class="label" style="margin-bottom: 8px;">Deskripsi:</span>
+            <span class="value" id="resDesc" style="text-align: justify;"></span>
+        </div>
+    </div>
+</div>
+
+<script>
+/**
+ * TYPE DEFINITIONS & UTILS
+ */
+const ENDPOINT = "https://dbpedia.org/sparql";
+
+function formatResource(name) {
+    return name.trim()
+        .split(' ')
+        .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+        .join('_');
+}
+
+/**
+ * MAIN FETCH FUNCTION
+ */
+async function fetchMusician() {
+    const input = document.getElementById("searchInput").value.trim();
+    if (!input) return;
+
+    const resource = formatResource(input);
+    updateStatus('loading');
+
+    // Menggunakan GROUP_CONCAT agar genre yang banyak tidak membuat baris duplikat
+    // Menggunakan Full URI <...> untuk menghindari error syntax dbr: (band)
+    const query = `
+    PREFIX dbo: <http://dbpedia.org/ontology/>
+    PREFIX dbp: <http://dbpedia.org/property/>
+    PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+    PREFIX dbr: <http://dbpedia.org/resource/>
+
+    SELECT ?label ?abstract ?thumbnail ?activeYear 
+           (GROUP_CONCAT(DISTINCT ?genreName; separator=", ") AS ?genres)
+           (GROUP_CONCAT(DISTINCT ?originName; separator=", ") AS ?origins)
+    WHERE {
+        BIND(<http://dbpedia.org/resource/${resource}> AS ?artist)
+        
+        ?artist rdfs:label ?label .
+        FILTER(lang(?label)='en')
+
+        OPTIONAL { ?artist dbo:abstract ?abstract . FILTER(lang(?abstract)='en' || lang(?abstract)='id') }
+        OPTIONAL { ?artist dbo:thumbnail ?thumbnail }
+        
+        OPTIONAL { 
+            ?artist dbo:genre ?g . ?g rdfs:label ?genreName . 
+            FILTER(lang(?genreName)='en')
+        }
+        
+        OPTIONAL {
+            { ?artist dbo:hometown ?o } UNION { ?artist dbo:origin ?o }
+            ?o rdfs:label ?originName .
+            FILTER(lang(?originName)='en')
+        }
+
+        OPTIONAL {
+            { ?artist dbo:activeYearsStartYear ?activeYear }
+            UNION { ?artist dbp:yearsActive ?activeYear }
+        }
+    } 
+    GROUP BY ?label ?abstract ?thumbnail ?activeYear
+    LIMIT 1`;
+
+    try {
+        const url = `${ENDPOINT}?query=${encodeURIComponent(query)}&format=json`;
+        const response = await fetch(url);
+        
+        if (!response.ok) throw new Error("Server DBpedia tidak merespon.");
+        
+        const data = await response.json();
+        const bindings = data.results.bindings;
+
+        if (bindings.length === 0) {
+            // Coba lagi dengan suffix (band) jika gagal
+            if (!resource.endsWith('_(band)')) {
+                document.getElementById("searchInput").value = input + " (band)";
+                return fetchMusician();
+            }
+            throw new Error("Musisi tidak ditemukan. Coba ejaan bahasa Inggris.");
+        }
+
+        render(bindings[0]);
+    } catch (err) {
+        updateStatus('error', err.message);
+    }
+}
+
+/**
+ * RENDERER
+ */
+function render(item) {
+    const safe = (obj, fallback = "-") => (obj && obj.value) ? obj.value : fallback;
+
+    // Mapping Data
+    document.getElementById("resName").innerText = safe(item.label);
+    document.getElementById("resDesc").innerText = safe(item.abstract).substring(0, 600) + "...";
+    document.getElementById("resGenre").innerText = safe(item.genres);
+    document.getElementById("resOrigin").innerText = safe(item.origins);
+    document.getElementById("resActive").innerText = safe(item.activeYear);
+
+    // Image Handling
+    const imgElement = document.getElementById("resImg");
+    if (item.thumbnail) {
+        imgElement.src = item.thumbnail.value;
+        imgElement.style.display = "inline-block";
+    } else {
+        imgElement.src = "https://via.placeholder.com/200x200?text=No+Image";
+    }
+
+    updateStatus('success');
+}
+
+/**
+ * UI STATE MANAGER
+ */
+function updateStatus(state, msg = "") {
+    const loading = document.getElementById("loadingState");
+    const error = document.getElementById("errorState");
+    const result = document.getElementById("resultArea");
+    const btn = document.getElementById("btnSearch");
+
+    loading.style.display = (state === 'loading') ? "block" : "none";
+    error.style.display = (state === 'error') ? "block" : "none";
+    result.style.display = (state === 'success') ? "block" : "none";
+    btn.disabled = (state === 'loading');
+
+    if (msg) error.innerText = msg;
+}
+
+// Initial Load
+window.onload = fetchMusician;
+</script>
+
+</body>
+</html>
